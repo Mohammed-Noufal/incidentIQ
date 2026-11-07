@@ -1,0 +1,423 @@
+[
+  {
+    "code": "INC-001",
+    "serviceName": "cache-service",
+    "title": "Redis out of memory errors under peak traffic",
+    "symptoms": "Redis returning OOM command not allowed errors. Memory maxed at 100%. Cache read hit rate plummeted to 12%.",
+    "severity": "HIGH",
+    "failureFamily": "redis-memory-exhaustion",
+    "rootCause": "Volatile-lru eviction policy was misconfigured to noeviction during recent terraform migration.",
+    "lesson": "Always verify redis eviction policy matches cluster role after infrastructure changes.",
+    "actions": [
+      {
+        "sequenceNo": 1,
+        "actionDescription": "Flushed all Redis keys using FLUSHALL",
+        "targetService": "cache-service",
+        "outcome": "WORSENED",
+        "observation": "Downstream databases experienced immediate thundering herd traffic spike.",
+        "explanation": "Flushing the entire cache forced every downstream microservice to fetch data directly from the databases simultaneously, collapsing the primary read replicas."
+      },
+      {
+        "sequenceNo": 2,
+        "actionDescription": "Set maxmemory-policy to allkeys-lru and doubled cache replica capacity",
+        "targetService": "cache-service",
+        "outcome": "RESOLVED",
+        "observation": "Memory stabilized at 82% and hit rates returned to 94%.",
+        "explanation": "Proper LRU eviction allowed redis to discard cold keys safely without stampeding backend databases."
+      }
+    ]
+  },
+  {
+    "code": "INC-002",
+    "serviceName": "orders-api",
+    "title": "Disk usage 100% on log volume /var/log",
+    "symptoms": "Orders API pods crashing with disk I/O errors. File system is completely full on log mount.",
+    "severity": "HIGH",
+    "failureFamily": "disk-full-log-rotation",
+    "rootCause": "Debug level logging was left enabled on production payment interceptor.",
+    "lesson": "Ensure logrotate runs every 15 minutes with maxsize cap and log levels are restricted.",
+    "actions": [
+      {
+        "sequenceNo": 1,
+        "actionDescription": "Deleted active log files using rm -rf /var/log/orders-api.log",
+        "targetService": "orders-api",
+        "outcome": "NO_EFFECT",
+        "observation": "Disk space was not reclaimed by the operating system.",
+        "explanation": "The JVM process still held open file handles to the unlinked file descriptors, preventing ext4 from reclaiming blocks."
+      },
+      {
+        "sequenceNo": 2,
+        "actionDescription": "Truncated open log file with truncate -s 0 and restarted fluentd shipper",
+        "targetService": "orders-api",
+        "outcome": "RESOLVED",
+        "observation": "Disk usage dropped to 14% immediately.",
+        "explanation": "Truncating kept the file descriptor valid while immediately freeing allocated disk blocks."
+      }
+    ]
+  },
+  {
+    "code": "INC-003",
+    "serviceName": "payments-worker",
+    "title": "DNS lookup timeout causing payment webhook drops",
+    "symptoms": "Payments worker failing to reach Stripe gateway; UnknownHostException appearing in application logs.",
+    "severity": "CRITICAL",
+    "failureFamily": "dns-resolution-timeout",
+    "rootCause": "CoreDNS pods were overloaded due to aggressive ndots:5 configuration in Kubernetes.",
+    "lesson": "Append trailing dot to external FQDNs and increase CoreDNS replicas with autoscaling.",
+    "actions": [
+      {
+        "sequenceNo": 1,
+        "actionDescription": "Added Stripe static IP directly to /etc/hosts on payment workers",
+        "targetService": "payments-worker",
+        "outcome": "WORSENED",
+        "observation": "TLS certificate validation failed for stripe.com API calls.",
+        "explanation": "Hardcoding IP caused requests to fail SNI routing and hit an IP that rotated within 10 minutes, completely blocking all payments."
+      },
+      {
+        "sequenceNo": 2,
+        "actionDescription": "Scaled CoreDNS deployment from 2 to 8 replicas and enabled NodeLocal DNSCache",
+        "targetService": "payments-worker",
+        "outcome": "RESOLVED",
+        "observation": "DNS latency fell below 1ms and payment webhooks succeeded.",
+        "explanation": "NodeLocal DNS eliminated cluster-wide CoreDNS UDP bottlenecks."
+      }
+    ]
+  },
+  {
+    "code": "INC-004",
+    "serviceName": "orders-api",
+    "title": "Database deadlocks on high concurrency checkout cart updates",
+    "symptoms": "HTTP 500 spike during flash sale. MySQL error 1213: Deadlock found when trying to get lock.",
+    "severity": "HIGH",
+    "failureFamily": "db-deadlock-cascade",
+    "rootCause": "Cart items were being updated in random order by concurrent checkout threads.",
+    "lesson": "Always sort entities by primary key ID before acquiring row locks in transactions.",
+    "actions": [
+      {
+        "sequenceNo": 1,
+        "actionDescription": "Increased transaction isolation level to SERIALIZABLE",
+        "targetService": "orders-api",
+        "outcome": "WORSENED",
+        "observation": "Deadlock rate increased by 400% and transaction throughput collapsed.",
+        "explanation": "Higher isolation caused MySQL InnoDB to acquire extensive range locks, causing massive serialization conflicts across unrelated users."
+      },
+      {
+        "sequenceNo": 2,
+        "actionDescription": "Sorted line items by product_id ascending before applying updates and added retry with jitter",
+        "targetService": "orders-api",
+        "outcome": "RESOLVED",
+        "observation": "Deadlocks dropped to zero even under 15,000 checkout req/sec.",
+        "explanation": "Consistent lock ordering across all concurrent transactions mathematically prevents deadlock cycles."
+      }
+    ]
+  },
+  {
+    "code": "INC-005",
+    "serviceName": "payments-worker",
+    "title": "JVM garbage collection pauses exceeding 12 seconds",
+    "symptoms": "Payments worker unresponsive; health check probes timing out; Stop-The-World GC pauses logged.",
+    "severity": "HIGH",
+    "failureFamily": "jvm-gc-exhaustion",
+    "rootCause": "Heap fragmentation caused by allocating massive 50MB byte arrays for uncompressed invoice PDFs.",
+    "lesson": "Stream large binary payloads to object storage instead of loading into heap buffers.",
+    "actions": [
+      {
+        "sequenceNo": 1,
+        "actionDescription": "Increased heap size from 4GB to 16GB without changing GC collector",
+        "targetService": "payments-worker",
+        "outcome": "WORSENED",
+        "observation": "GC pause duration increased from 8s to 35s, causing Kubernetes to kill pods repeatedly.",
+        "explanation": "Larger heap with Serial/Parallel GC meant mark-sweep cycles took four times longer when full collections were triggered."
+      },
+      {
+        "sequenceNo": 2,
+        "actionDescription": "Switched to ZGC collector with streaming byte buffers for PDF generation",
+        "targetService": "payments-worker",
+        "outcome": "RESOLVED",
+        "observation": "Max GC pause dropped below 2ms under continuous load.",
+        "explanation": "Concurrent garbage collection removed stop-the-world pauses regardless of allocation rate."
+      }
+    ]
+  },
+  {
+    "code": "INC-006",
+    "serviceName": "orders-api",
+    "title": "Kafka consumer group rebalancing loop",
+    "symptoms": "Order processing delayed by hours; consumer group constantly rebalancing; max.poll.interval.ms exceeded.",
+    "severity": "HIGH",
+    "failureFamily": "kafka-rebalance-storm",
+    "rootCause": "Third-party fraud verification call took 35 seconds per batch, exceeding the default 30s poll timeout.",
+    "lesson": "Process slow external IO asynchronously or increase max.poll.interval.ms proportionally.",
+    "actions": [
+      {
+        "sequenceNo": 1,
+        "actionDescription": "Reduced session.timeout.ms to 6000ms",
+        "targetService": "orders-api",
+        "outcome": "WORSENED",
+        "observation": "Consumers were dropped even faster by coordinator, creating endless rebalance storm.",
+        "explanation": "Lower session timeout triggered premature heartbeats failures while worker threads were legitimately busy."
+      },
+      {
+        "sequenceNo": 2,
+        "actionDescription": "Increased max.poll.interval.ms to 300000ms and reduced max.poll.records to 50",
+        "targetService": "orders-api",
+        "outcome": "RESOLVED",
+        "observation": "Consumer group stabilized and queue backlog cleared within 15 minutes.",
+        "explanation": "Smaller batches allowed consumers to finish processing well within the heartbeat deadline."
+      }
+    ]
+  },
+  {
+    "code": "INC-007",
+    "serviceName": "cache-service",
+    "title": "Hot key saturation crashing single Redis shard",
+    "symptoms": "Redis shard CPU pegged at 100%; latency over 2000ms for flash-sale product metadata key.",
+    "severity": "HIGH",
+    "failureFamily": "hot-key-cache-saturation",
+    "rootCause": "Over 80,000 requests/sec querying the exact same un-replicated product key.",
+    "lesson": "Add client-side local caching (Caffeine) for super-hot read-only keys with short TTL.",
+    "actions": [
+      {
+        "sequenceNo": 1,
+        "actionDescription": "Deleted hot key to force cache invalidation",
+        "targetService": "cache-service",
+        "outcome": "WORSENED",
+        "observation": "Backend PostgreSQL database CPU spiked to 100% within 3 seconds.",
+        "explanation": "Without the hot key in Redis, all 80,000 requests hit the underlying SQL query simultaneously."
+      },
+      {
+        "sequenceNo": 2,
+        "actionDescription": "Introduced near-cache Caffeine layer in application with 15s TTL and key sharding",
+        "targetService": "cache-service",
+        "outcome": "RESOLVED",
+        "observation": "Redis shard CPU dropped to 18%; product page load time dropped to 15ms.",
+        "explanation": "In-memory JVM cache absorbed 99.8% of requests before they reached the shared Redis cluster."
+      }
+    ]
+  },
+  {
+    "code": "INC-008",
+    "serviceName": "payments-worker",
+    "title": "Circuit breaker flapping during downstream bank gateway degradation",
+    "symptoms": "Payment transactions intermittently failing with CircuitBreakerOpenException every 30 seconds.",
+    "severity": "HIGH",
+    "failureFamily": "circuit-breaker-flapping",
+    "rootCause": "Circuit breaker ring buffer was too small (size 10), causing a single error to trip the breaker immediately.",
+    "lesson": "Configure minimum number of calls (50+) and smooth moving average error rate thresholds.",
+    "actions": [
+      {
+        "sequenceNo": 1,
+        "actionDescription": "Force disabled circuit breaker completely in configuration",
+        "targetService": "payments-worker",
+        "outcome": "WORSENED",
+        "observation": "Worker thread pool became totally exhausted waiting on frozen bank endpoints.",
+        "explanation": "Disabling the circuit breaker caused all HTTP worker threads to hang indefinitely on slow bank responses until the entire service crashed."
+      },
+      {
+        "sequenceNo": 2,
+        "actionDescription": "Adjusted sliding window size to 100 calls, failure rate threshold to 50%, and wait duration in open state to 60s",
+        "targetService": "payments-worker",
+        "outcome": "RESOLVED",
+        "observation": "Circuit breaker transitioned cleanly and bank degradation was isolated gracefully.",
+        "explanation": "A representative window size prevented false positives from isolated transient errors."
+      }
+    ]
+  },
+  {
+    "code": "INC-009",
+    "serviceName": "orders-api",
+    "title": "TLS certificate expired on internal gRPC service mesh",
+    "symptoms": "Orders API unable to talk to Inventory service; SSLHandshakeException: certificate expired.",
+    "severity": "CRITICAL",
+    "failureFamily": "tls-cert-expiration",
+    "rootCause": "Cert-manager auto-renewal webhook was blocked by admission controller security policy.",
+    "lesson": "Set up Prometheus alerts for certificates expiring within 14 days and test renewal pathways.",
+    "actions": [
+      {
+        "sequenceNo": 1,
+        "actionDescription": "Disabled TLS verification in gRPC client config across services",
+        "targetService": "orders-api",
+        "outcome": "WORSENED",
+        "observation": "Service mesh proxy refused plaintext traffic and broke mutual TLS authentication.",
+        "explanation": "Istio Envoy sidecars strictly enforce mTLS in STRICT mode; disabling client TLS resulted in 100% immediate connection drops."
+      },
+      {
+        "sequenceNo": 2,
+        "actionDescription": "Manually renewed CA bundle and patched cert-manager admission webhook permissions",
+        "targetService": "orders-api",
+        "outcome": "RESOLVED",
+        "observation": "mTLS handshakes succeeded immediately across all microservices.",
+        "explanation": "Valid certificate chain restored secure inter-service communication without compromising mesh policies."
+      }
+    ]
+  },
+  {
+    "code": "INC-010",
+    "serviceName": "cache-service",
+    "title": "Split-brain condition on Redis sentinel failover",
+    "symptoms": "Inconsistent cache entries; multiple Redis instances claiming master role simultaneously.",
+    "severity": "HIGH",
+    "failureFamily": "redis-sentinel-split-brain",
+    "rootCause": "Network partition between availability zones separated two sentinel nodes from the master.",
+    "lesson": "Deploy minimum 3 Sentinels across 3 distinct AZs and enforce min-replicas-to-write.",
+    "actions": [
+      {
+        "sequenceNo": 1,
+        "actionDescription": "Restarted Sentinel processes simultaneously across all nodes",
+        "targetService": "cache-service",
+        "outcome": "NO_EFFECT",
+        "observation": "Both masters continued to accept writes and state diverged further.",
+        "explanation": "Sentinels re-read conflicting cluster state upon boot without resolving underlying quorum."
+      },
+      {
+        "sequenceNo": 2,
+        "actionDescription": "Configured min-replicas-to-write 1 and demoted isolated old master to replica",
+        "targetService": "cache-service",
+        "outcome": "RESOLVED",
+        "observation": "Single authoritative master established; data synchronized.",
+        "explanation": "Min-replicas-to-write prevents disconnected masters from accepting writes during network partitions."
+      }
+    ]
+  },
+  {
+    "code": "INC-011",
+    "serviceName": "payments-worker",
+    "title": "RabbitMQ dead letter exchange queue flooding",
+    "symptoms": "RabbitMQ broker memory alarm tripped; disk paging started; payment confirmation queue blocked.",
+    "severity": "HIGH",
+    "failureFamily": "rabbitmq-dlx-flooding",
+    "rootCause": "Malformed webhook payloads failed validation and were rejected without discarding or un-routing.",
+    "lesson": "Always configure maximum queue length (x-max-length) and TTL for dead letter exchanges.",
+    "actions": [
+      {
+        "sequenceNo": 1,
+        "actionDescription": "Purged all queues including main transactional queues",
+        "targetService": "payments-worker",
+        "outcome": "WORSENED",
+        "observation": "Legitimate in-flight customer payments were lost and required manual database reconciliation.",
+        "explanation": "Blindly purging queues discarded unprocessed customer transactions along with the bad messages."
+      },
+      {
+        "sequenceNo": 2,
+        "actionDescription": "Applied message TTL on dead-letter exchange and patched JSON validation schema",
+        "targetService": "payments-worker",
+        "outcome": "RESOLVED",
+        "observation": "Broker memory alarm cleared and valid payment events resumed processing.",
+        "explanation": "Expiring bad messages freed RAM while schema fix prevented new validation loops."
+      }
+    ]
+  },
+  {
+    "code": "INC-012",
+    "serviceName": "orders-api",
+    "title": "CPU throttling due to overly aggressive Kubernetes cgroups limits",
+    "symptoms": "p99 latency 6000ms while CPU usage reported only 45%; severe container throttling observed.",
+    "severity": "MEDIUM",
+    "failureFamily": "k8s-cgroups-throttling",
+    "rootCause": "CPU limit was set to 500m on multi-threaded Spring Boot application doing parallel stream operations.",
+    "lesson": "Remove hard CPU limits on latency-sensitive Java workloads or size limits to multiple whole cores.",
+    "actions": [
+      {
+        "sequenceNo": 1,
+        "actionDescription": "Increased number of pod replicas from 5 to 20 without altering resource limits",
+        "targetService": "orders-api",
+        "outcome": "NO_EFFECT",
+        "observation": "Individual requests were still throttled during their 100ms CFS quota window.",
+        "explanation": "Horizontal scaling does not eliminate thread-level quota exhaustion on individual multi-threaded requests."
+      },
+      {
+        "sequenceNo": 2,
+        "actionDescription": "Removed CPU limits and increased requests to 2000m with ActiveProcessorCount=2",
+        "targetService": "orders-api",
+        "outcome": "RESOLVED",
+        "observation": "p99 latency dropped from 6000ms to 45ms immediately.",
+        "explanation": "Eliminating CFS quota throttling allowed Java ForkJoinPool threads to run to completion without pauses."
+      }
+    ]
+  },
+  {
+    "code": "INC-013",
+    "serviceName": "payments-worker",
+    "title": "Database replica replication lag exceeding 45 minutes",
+    "symptoms": "Payment reconciliation reporting false missing orders; read queries returning stale data.",
+    "severity": "HIGH",
+    "failureFamily": "db-replication-lag",
+    "rootCause": "Unindexed table migration on primary wrote 10 million row updates in a single giant transaction.",
+    "lesson": "Execute large schema migrations in small batches and monitor Seconds_Behind_Master.",
+    "actions": [
+      {
+        "sequenceNo": 1,
+        "actionDescription": "Restarted MySQL replica server",
+        "targetService": "payments-worker",
+        "outcome": "WORSENED",
+        "observation": "Crash recovery on startup required re-parsing relay logs, increasing lag from 45 to 80 minutes.",
+        "explanation": "Abrupt restart forced InnoDB redo log replay during startup before replication SQL thread could even resume."
+      },
+      {
+        "sequenceNo": 2,
+        "actionDescription": "Configured replica_parallel_workers=8 and replica_parallel_type=LOGICAL_CLOCK",
+        "targetService": "payments-worker",
+        "outcome": "RESOLVED",
+        "observation": "Replication caught up to real-time within 6 minutes.",
+        "explanation": "Multi-threaded applier executed non-conflicting transactions in parallel across CPU cores."
+      }
+    ]
+  },
+  {
+    "code": "INC-014",
+    "serviceName": "orders-api",
+    "title": "OAuth token introspection endpoint latency spike",
+    "symptoms": "All API requests timing out at 30 seconds during user authentication phase.",
+    "severity": "CRITICAL",
+    "failureFamily": "oauth-introspection-saturation",
+    "rootCause": "Remote authorization server was degraded; orders API was validating every bearer token remotely without caching.",
+    "lesson": "Use self-contained JWT tokens with local public key verification instead of remote opaque token introspection.",
+    "actions": [
+      {
+        "sequenceNo": 1,
+        "actionDescription": "Increased HTTP client connection timeout to 60 seconds",
+        "targetService": "orders-api",
+        "outcome": "WORSENED",
+        "observation": "Tomcat thread pool hit 100% exhaustion in under 10 seconds; health checks failed.",
+        "explanation": "Holding threads open for 60 seconds consumed all server request threads, making the entire API totally unresponsive."
+      },
+      {
+        "sequenceNo": 2,
+        "actionDescription": "Enabled local JWT verification with cached JWKS public keys and 5-minute introspection cache",
+        "targetService": "orders-api",
+        "outcome": "RESOLVED",
+        "observation": "Authentication time dropped to 0.4ms per request.",
+        "explanation": "Cryptographic signature check eliminated external network round-trips for token validation."
+      }
+    ]
+  },
+  {
+    "code": "INC-015",
+    "serviceName": "cache-service",
+    "title": "Serialization incompatibility following library version bump",
+    "symptoms": "Cache reads throwing InvalidClassException: serialVersionUID mismatch on session data.",
+    "severity": "HIGH",
+    "failureFamily": "cache-serialization-mismatch",
+    "rootCause": "UserSession class added a field without defining a static final serialVersionUID.",
+    "lesson": "Explicitly define serialVersionUID on all cached domain models or use JSON serialization.",
+    "actions": [
+      {
+        "sequenceNo": 1,
+        "actionDescription": "Downgraded application deployment without clearing cache",
+        "targetService": "cache-service",
+        "outcome": "NO_EFFECT",
+        "observation": "Old instances threw errors when reading newer serialized objects already stored in Redis.",
+        "explanation": "Objects written by the new deployment remained unreadable to the old deployment."
+      },
+      {
+        "sequenceNo": 2,
+        "actionDescription": "Migrated Redis serialization format to Jackson JSON and cleared user session namespace",
+        "targetService": "cache-service",
+        "outcome": "RESOLVED",
+        "observation": "Serialization errors ceased; sessions deserialized gracefully with backward compatibility.",
+        "explanation": "JSON text serialization is resilient to field additions and removals without JVM class version coupling."
+      }
+    ]
+  }
+]
+
