@@ -1,0 +1,69 @@
+# IncidentIQ Agent — API Documentation
+
+**Base URL:** `http://localhost:8080`  
+**Authentication:** Bearer JWT (HS256)
+
+## API Endpoints
+
+| Group | Method | Endpoint | Authentication |
+|---|---|---|---|
+| Auth | POST | `/api/auth/register` | Public |
+| Auth | POST | `/api/auth/login` | Public |
+| Auth | GET | `/api/auth/me` | Protected |
+| Incidents | GET | `/api/incidents` | Protected |
+| Incidents | GET | `/api/incidents/{id}` | Protected |
+| Incidents | POST | `/api/incidents/{id}/actions` | Protected |
+| Incidents | PATCH | `/api/incidents/{id}/actions/{seq}/outcome` | Protected |
+| Incidents | POST | `/api/incidents/{id}/resolve` | Protected |
+| Incidents | POST | `/api/incidents/{id}/memory/retain` | Protected |
+| Briefing | POST | `/api/incidents/{id}/briefing` | Protected |
+| Briefing | GET | `/api/incidents/{id}/briefing` | Protected |
+| Alerts | POST | `/api/alerts` | Protected |
+| Service Catalog | GET | `/api/services` | Protected |
+| Service Catalog | GET | `/api/services/{name}` | Protected |
+| Feedback | POST | `/api/feedback` | Public |
+| Feedback | GET | `/api/feedback` | Public |
+| Demo | POST | `/api/demo/investigate` | Protected |
+| Admin | POST | `/api/admin/seed` | Protected |
+| Health | GET | `/api/health` | Public |
+
+## Detailed Documentation
+
+The complete API reference covers:
+
+- Request and response body structures for every endpoint.
+- Supported enum values: `Severity`, `IncidentStatus`, `Outcome`, and `MemorySyncStatus`.
+- Field validation rules and constraints.
+- Error response formats and HTTP status codes.
+- Complete cURL walkthrough of the incident lifecycle:
+  1. Register an account.
+  2. Create an alert.
+  3. Generate an incident briefing.
+  4. Record an investigation action.
+  5. Resolve the incident.
+- Degraded-mode behavior when `GROQ_API_KEY` or `HINDSIGHT_API_KEY` is unavailable.
+
+## Configuration
+
+The application uses environment variables for external AI integrations:
+
+- `GROQ_API_KEY`
+- `HINDSIGHT_API_KEY`
+
+Some functionality may operate in degraded mode when these integrations are unavailable.
+
+## Running Locally
+
+Start the Spring Boot application and access the API at:
+
+`http://localhost:8080`
+
+Check application health using:
+
+`GET /api/health`
+
+---
+
+**Note:** Protected endpoints require a valid JWT access token in the Authorization header:
+
+`Authorization: Bearer YOUR_JWT_TOKEN`
